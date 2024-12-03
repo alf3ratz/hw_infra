@@ -16,7 +16,7 @@ write_files:
 
       cd bookspider
       sudo python3.10 -m venv .venv
-      sudo .venv/bin/python -m pip install scrapy psycopg2
+      sudo .venv/bin/python -m pip install scrapy psycopg2 scrapy-redis
       sudo db_host=${db_host} db_user=${db_user} db_pswd=${db_pswd} db_name=${db_name} redis_url=${redis_url} .venv/bin/scrapy crawl redis_bookspider
     defer: true
 runcmd:

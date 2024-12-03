@@ -66,7 +66,7 @@ resource "yandex_compute_instance" "virtual-machine" {
       db_user = yandex_mdb_postgresql_user.user.name
       db_pswd = yandex_mdb_postgresql_user.user.password
       ssh-key = "${file("~/.ssh/id_rsa.pub")}"
-      redis_url =  "redis://${yandex_vpc_network.network.address}:6379"
+      redis_url =  "redis://pswdpswd@${yandex_mdb_redis_cluster.redis_cluster.host[0].fqdn}:6379"
     })  
   }
 }
@@ -301,23 +301,19 @@ resource "yandex_mdb_redis_cluster" "redis_cluster" {
   name                = "redis_cluster"
   environment         = "PRESTABLE"
   network_id          = yandex_vpc_network.network.id
-  tls_enabled         = true
+  tls_enabled         = false
+  announce_hostnames  = true
 
   config {
-    memory_limit = "4GB"
-    version      = "6.0"
-    port         = 6379
+    version      = "7.2"
+    password     = "pswdpswd"
   }
 
   resources {
-    resource_preset = "s2.micro"
-    disk {
-      size  = 10
-      type  = "network-ssd"
-    }
-    replicas = 3
+    resource_preset_id = "hm3-c2-m8"
+    disk_type_id       = "network-ssd"
+    disk_size          = 16
   }
-  node_count = 2
 
   host {
     zone             = var.yc_zone
