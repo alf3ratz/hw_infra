@@ -30,6 +30,22 @@ resource "yandex_vpc_subnet" "subnetwork" {
   v4_cidr_blocks = ["192.168.10.0/24"]
 }
 
+resource "yandex_vpc_subnet" "subnetwork-to-each-zone" {
+  for_each = var.zones
+  name           = keys(var.subnets)[index(tolist(var.zones), each.value)]
+  zone           = each.value
+  v4_cidr_blocks = var.subnets[each.value]
+  network_id     = yandex_vpc_network.network.id
+}
+
+resource "yandex_vpc_address" "address-to-each-zone" {
+  for_each = var.zones
+  name = length(var.zones) > 1 ? "$vm-address-${substr(each.value, -1, 0)}" : "vm-address"
+  external_ipv4_address {
+    zone_id = each.value
+  }
+} 
+
 data "yandex_compute_image" "image" {
   family = "ubuntu-2204-lts"
 }
@@ -41,8 +57,16 @@ resource "yandex_compute_disk" "boot-disk" {
   image_id = data.yandex_compute_image.image.id
 }
 
-# Виртуальная машина
-resource "yandex_compute_instance" "virtual-machine" {
+resource "yandex_compute_disk" "boot-disk-to-each-zone" {
+  for_each = var.zones
+  name     = length(var.zones) > 1 ? "boot-disk-${substr(each.value, -1, 0)}" : "boot-disk"
+  zone     = each.value
+  image_id = data.yandex_compute_image.image.id
+  size = 10
+}
+
+# Виртуальная машина, которая добавляет записи в редис
+resource "yandex_compute_instance" "virtual-machine-with-redis-pusher" {
   name        = "virtual-machine"
   platform_id = "standard-v3"
   resources {
@@ -66,8 +90,41 @@ resource "yandex_compute_instance" "virtual-machine" {
       db_user = yandex_mdb_postgresql_user.user.name
       db_pswd = yandex_mdb_postgresql_user.user.password
       ssh-key = "${file("~/.ssh/id_rsa.pub")}"
-      redis_url =  "redis://pswdpswd@${yandex_mdb_redis_cluster.redis_cluster.host[0].fqdn}:6379"
-    })  
+      redis_url =  "redis://pswdpswd@${yandex_mdb_redis_cluster.redis_cluster[0].host[0].fqdn}:6379"
+    }) 
+  }
+}
+
+
+resource "yandex_compute_instance" "virtual-machine-to-each-zone" {
+  for_each = var.zones
+  name     = length(var.zones) > 1 ? "$vm-${substr(each.value, -1, 0)}" : "vm"
+  zone     = each.value
+  platform_id = "standard-v3"
+  resources {
+    cores  = 2
+    memory = 4
+  }
+
+  boot_disk {
+    disk_id = yandex_compute_disk.boot-disk-to-each-zone[each.value].id
+  }
+
+  network_interface {
+    subnet_id      = yandex_vpc_subnet.subnetwork-to-each-zone[each.value].id
+    nat            = true
+    nat_ip_address = yandex_vpc_address.address-to-each-zone[each.value].external_ipv4_address[0].address
+  }
+
+  metadata = {
+    user-data = templatefile("${path.module}/cloud-to-each-zone-init.yml.tftpl", {
+      db_host = yandex_mdb_postgresql_cluster.mypg.host[0].fqdn
+      db_name = yandex_mdb_postgresql_database.db.name
+      db_user = yandex_mdb_postgresql_user.user.name
+      db_pswd = yandex_mdb_postgresql_user.user.password
+      ssh-key = "${file("~/.ssh/id_rsa.pub")}"
+      redis_url =  "redis://pswdpswd@${yandex_mdb_redis_cluster.redis_cluster[each.value].host[0].fqdn}:6379"
+    }) 
   }
 }
 
@@ -89,173 +146,19 @@ resource "yandex_iam_service_account_static_access_key" "sa-key" {
 }
 
 # Объектное хранилище
-resource "yandex_storage_bucket" "bucket" {
-  bucket = "terraform-bucket-${random_string.bucket_name.result}"
-  access_key = yandex_iam_service_account_static_access_key.sa-key.access_key
-  secret_key = yandex_iam_service_account_static_access_key.sa-key.secret_key
+# resource "yandex_storage_bucket" "bucket" {
+#   bucket = "terraform-bucket-${random_string.bucket_name.result}"
+#   access_key = yandex_iam_service_account_static_access_key.sa-key.access_key
+#   secret_key = yandex_iam_service_account_static_access_key.sa-key.secret_key
 
-  depends_on = [ yandex_resourcemanager_folder_iam_member.service-account-roles ]
-}
+#   depends_on = [ yandex_resourcemanager_folder_iam_member.service-account-roles ]
+# }
 
-resource "random_string" "bucket_name" {
-  length  = 8
-  special = false
-  upper   = false
-} 
-
-# Дашборд для мониторинга
-data "yandex_monitoring_dashboard" "my_dashboard" {
-  dashboard_id = yandex_monitoring_dashboard.my-dashboard.id
-  folder_id   = var.yc_folder_id
-}
-
-resource "yandex_monitoring_dashboard" "my-dashboard" {
-  name        = "local-id-resource"
-  description = "Description"
-  title       = "My title"
-  folder_id   = var.yc_folder_id
-  labels = {
-    a = "b"
-  }
-  parametrization {
-    selectors = "a=b"
-    parameters {
-      description = "param1 description"
-      title       = "title"
-      hidden      = false
-      id          = "param1"
-      custom {
-        default_values  = ["1", "2"]
-        values          = ["1", "2", "3"]
-        multiselectable = true
-      }
-    }
-    parameters {
-      hidden = true
-      id     = "param2"
-      label_values {
-        default_values  = ["1", "2"]
-        multiselectable = true
-        label_key       = "key"
-        selectors       = "a=b"
-      }
-    }
-    parameters {
-      hidden = true
-      id     = "param3"
-      text {
-        default_value = "abc"
-      }
-    }
-  }
-  widgets {
-    text {
-      text = "text here"
-    }
-    position {
-      h = 1
-      w = 1
-      x = 4
-      y = 4
-    }
-  }
-  widgets {
-    chart {
-      description    = "chart description"
-      title          = "title for chart"
-      chart_id       = "chart1id"
-      display_legend = true
-      freeze         = "FREEZE_DURATION_HOUR"
-      name_hiding_settings {
-        names    = ["a", "b"]
-        positive = true
-      }
-      queries {
-        downsampling {
-          disabled         = false
-          gap_filling      = "GAP_FILLING_NULL"
-          grid_aggregation = "GRID_AGGREGATION_COUNT"
-          max_points       = 100
-        }
-        target {
-          hidden    = true
-          text_mode = true
-          query     = "{service=monitoring}"
-        }
-      }
-      series_overrides {
-        name = "name"
-        settings {
-          color          = "colorValue"
-          grow_down      = true
-          name           = "series_overrides name"
-          type           = "SERIES_VISUALIZATION_TYPE_LINE"
-          yaxis_position = "YAXIS_POSITION_LEFT"
-          stack_name     = "stack name"
-        }
-      }
-      visualization_settings {
-        aggregation = "SERIES_AGGREGATION_AVG"
-        interpolate = "INTERPOLATE_LEFT"
-        type        = "VISUALIZATION_TYPE_POINTS"
-        normalize   = true
-        show_labels = true
-        title       = "visualization_settings title"
-        color_scheme_settings {
-          gradient {
-            green_value  = "11"
-            red_value    = "22"
-            violet_value = "33"
-            yellow_value = "44"
-          }
-        }
-        heatmap_settings {
-          green_value  = "1"
-          red_value    = "2"
-          violet_value = "3"
-          yellow_value = "4"
-        }
-        yaxis_settings {
-          left {
-            max         = "111"
-            min         = "11"
-            title       = "yaxis_settings left title"
-            precision   = 3
-            type        = "YAXIS_TYPE_LOGARITHMIC"
-            unit_format = "UNIT_CELSIUS"
-          }
-          right {
-            max         = "22"
-            min         = "2"
-            title       = "yaxis_settings right title"
-            precision   = 2
-            type        = "YAXIS_TYPE_LOGARITHMIC"
-            unit_format = "UNIT_NONE"
-          }
-        }
-      }
-    }
-    position {
-      h = 100
-      w = 100
-      x = 6
-      y = 6
-    }
-  }
-  widgets {
-    title {
-      text = "title here"
-      size = "TITLE_SIZE_XS"
-    }
-    position {
-      h = 1
-      w = 1
-      x = 1
-      y = 1
-    }
-  }
-}
-
+# resource "random_string" "bucket_name" {
+#   length  = 8
+#   special = false
+#   upper   = false
+# } 
 
 # Кластер бд
 resource "yandex_mdb_postgresql_cluster" "mypg" {
@@ -298,9 +201,11 @@ resource "yandex_mdb_postgresql_user" "user" {
 }
 
 resource "yandex_mdb_redis_cluster" "redis_cluster" {
-  name                = "redis_cluster"
   environment         = "PRESTABLE"
   network_id          = yandex_vpc_network.network.id
+  for_each = var.zones
+  name     = length(var.zones) > 1 ? "redis-name-${substr(each.value, -1, 0)}" : "redis-name"
+
   tls_enabled         = false
   announce_hostnames  = true
 
@@ -316,8 +221,8 @@ resource "yandex_mdb_redis_cluster" "redis_cluster" {
   }
 
   host {
-    zone             = var.yc_zone
-    subnet_id        = yandex_vpc_subnet.subnetwork.id
+    zone             = each.value
+    subnet_id        = yandex_vpc_subnet.subnetwork-to-each-zone[each.value].id
   }
 }
 
