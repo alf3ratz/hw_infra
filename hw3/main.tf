@@ -1,4 +1,3 @@
-
 terraform {
   required_providers {
     yandex = {
@@ -15,72 +14,77 @@ provider "yandex" {
   zone      = var.yc_zone
 }
 
-provider "random" {
-} 
+provider "random" {}
 
+data "yandex_compute_image" "image" {
+  image_id = "fd8d16o0fku50qt0g8hl"
+}
 
 resource "yandex_vpc_network" "network" {
   name = "network"
 }
 
-resource "yandex_vpc_subnet" "subnetwork" {
-  name           = "subnetwork"
-  zone           = var.yc_zone
-  network_id     = yandex_vpc_network.network.id
-  v4_cidr_blocks = ["192.168.10.0/24"]
-}
-
 resource "yandex_vpc_subnet" "subnetwork-to-each-zone" {
   for_each = var.zones
-  name           = keys(var.subnets)[index(tolist(var.zones), each.value)]
-  zone           = each.value
+  name     = "subnetwork-${each.key}"
+  zone     = each.value
   v4_cidr_blocks = var.subnets[each.value]
   network_id     = yandex_vpc_network.network.id
 }
 
+# Внешний IP-адрес для каждой зоны
 resource "yandex_vpc_address" "address-to-each-zone" {
-  for_each = var.zones
-  name = length(var.zones) > 1 ? "$vm-address-${substr(each.value, -1, 0)}" : "vm-address"
+  for_each = var.subnets
+  name     = "vm_address-${each.key}"
   external_ipv4_address {
-    zone_id = each.value
+    zone_id = each.key
   }
-} 
-
-data "yandex_compute_image" "image" {
-  family = "ubuntu-2204-lts"
 }
 
-resource "yandex_compute_disk" "boot-disk" {
-  name     = "boot-disk"
-  zone     = var.yc_zone
-  size     = 10
-  image_id = data.yandex_compute_image.image.id
+resource "yandex_vpc_address" "address-to-each-zone-2" {
+  for_each = var.subnets
+  name     = "vm_address-2-${each.key}"
+  external_ipv4_address {
+    zone_id = each.key
+  }
 }
 
+# Диски для виртуальных машин в каждой зоне
 resource "yandex_compute_disk" "boot-disk-to-each-zone" {
-  for_each = var.zones
-  name     = length(var.zones) > 1 ? "boot-disk-${substr(each.value, -1, 0)}" : "boot-disk"
-  zone     = each.value
+  for_each = var.subnets
+  name     = "boot-disk-${each.key}"
+  zone     = each.key
   image_id = data.yandex_compute_image.image.id
-  size = 10
+  size     = 10
 }
 
-# Виртуальная машина, которая добавляет записи в редис
+resource "yandex_compute_disk" "boot-disk-to-each-zone-2" {
+  for_each = var.subnets
+  name     = "boot-disk-2${each.key}"
+  zone     = each.key
+  image_id = data.yandex_compute_image.image.id
+  size     = 10
+}
+
+
 resource "yandex_compute_instance" "virtual-machine-with-redis-pusher" {
-  name        = "virtual-machine"
+  for_each = var.zones
+  name     = "pusher-vm-${each.key}"
+  zone     = each.value
   platform_id = "standard-v3"
   resources {
     cores  = 2
     memory = 4
   }
+
   boot_disk {
-    disk_id = yandex_compute_disk.boot-disk.id
+    disk_id = yandex_compute_disk.boot-disk-to-each-zone-2[each.key].id
   }
 
   network_interface {
-    subnet_id = yandex_vpc_subnet.subnetwork.id
-    nat       = true
-    #nat_ip_address = yandex_vpc_address..external_ipv4_address[0].address
+    subnet_id      = yandex_vpc_subnet.subnetwork-to-each-zone[each.key].id
+    nat            = true
+    nat_ip_address = yandex_vpc_address.address-to-each-zone-2[each.key].external_ipv4_address[0].address
   }
 
   metadata = {
@@ -89,17 +93,21 @@ resource "yandex_compute_instance" "virtual-machine-with-redis-pusher" {
       db_name = yandex_mdb_postgresql_database.db.name
       db_user = yandex_mdb_postgresql_user.user.name
       db_pswd = yandex_mdb_postgresql_user.user.password
+      # db_host = "sdf"
+      # db_name = "fds"
+      # db_user="dsfsd"
+      # db_pswd="dsf"
+      # redis_url="fsdf"
       ssh-key = "${file("~/.ssh/id_rsa.pub")}"
-      redis_url =  "redis://pswdpswd@${yandex_mdb_redis_cluster.redis_cluster[0].host[0].fqdn}:6379"
-    }) 
+      redis_url = "redis://pswdpswd@${yandex_mdb_redis_cluster.redis_cluster[each.key].host[0].fqdn}:6379"
+    })
   }
 }
 
-
 resource "yandex_compute_instance" "virtual-machine-to-each-zone" {
-  for_each = var.zones
-  name     = length(var.zones) > 1 ? "$vm-${substr(each.value, -1, 0)}" : "vm"
-  zone     = each.value
+  for_each = var.subnets
+  name     = "vm-${each.key}"
+  zone     = each.key
   platform_id = "standard-v3"
   resources {
     cores  = 2
@@ -107,13 +115,13 @@ resource "yandex_compute_instance" "virtual-machine-to-each-zone" {
   }
 
   boot_disk {
-    disk_id = yandex_compute_disk.boot-disk-to-each-zone[each.value].id
+    disk_id = yandex_compute_disk.boot-disk-to-each-zone[each.key].id
   }
 
   network_interface {
-    subnet_id      = yandex_vpc_subnet.subnetwork-to-each-zone[each.value].id
+    subnet_id      = yandex_vpc_subnet.subnetwork-to-each-zone[each.key].id
     nat            = true
-    nat_ip_address = yandex_vpc_address.address-to-each-zone[each.value].external_ipv4_address[0].address
+    nat_ip_address = yandex_vpc_address.address-to-each-zone[each.key].external_ipv4_address[0].address
   }
 
   metadata = {
@@ -122,9 +130,14 @@ resource "yandex_compute_instance" "virtual-machine-to-each-zone" {
       db_name = yandex_mdb_postgresql_database.db.name
       db_user = yandex_mdb_postgresql_user.user.name
       db_pswd = yandex_mdb_postgresql_user.user.password
+      # db_host = "sdf"
+      # db_name = "fds"
+      # db_user="dsfsd"
+      # db_pswd="dsf"
+      # redis_url="fsdf"
       ssh-key = "${file("~/.ssh/id_rsa.pub")}"
-      redis_url =  "redis://pswdpswd@${yandex_mdb_redis_cluster.redis_cluster[each.value].host[0].fqdn}:6379"
-    }) 
+      redis_url =  "redis://pswdpswd@${yandex_mdb_redis_cluster.redis_cluster[each.key].host[0].fqdn}:6379"
+    })
   }
 }
 
@@ -145,29 +158,16 @@ resource "yandex_iam_service_account_static_access_key" "sa-key" {
   service_account_id = yandex_iam_service_account.service-account.id
 }
 
-# Объектное хранилище
-# resource "yandex_storage_bucket" "bucket" {
-#   bucket = "terraform-bucket-${random_string.bucket_name.result}"
-#   access_key = yandex_iam_service_account_static_access_key.sa-key.access_key
-#   secret_key = yandex_iam_service_account_static_access_key.sa-key.secret_key
+resource "random_string" "bucket_name" {
+  length  = 8
+  special = false
+  upper   = false
+}
 
-#   depends_on = [ yandex_resourcemanager_folder_iam_member.service-account-roles ]
-# }
-
-# resource "random_string" "bucket_name" {
-#   length  = 8
-#   special = false
-#   upper   = false
-# } 
-
-# Кластер бд
 resource "yandex_mdb_postgresql_cluster" "mypg" {
   name                = "mypg"
   environment         = "PRESTABLE"
   network_id          = yandex_vpc_network.network.id
-  #security_group_ids  = [ yandex_vpc_security_group.pgsql-sg.id ]
-  #deletion_protection = true
-
   config {
     version = 17
     resources {
@@ -182,9 +182,9 @@ resource "yandex_mdb_postgresql_cluster" "mypg" {
   }
 
   host {
-    zone      = var.yc_zone
+    zone      = "ru-central1-b"
     name      = "mypg-host-a"
-    subnet_id = yandex_vpc_subnet.subnetwork.id
+    subnet_id = yandex_vpc_subnet.subnetwork-to-each-zone["ru-central1-b"].id
   }
 }
 
@@ -203,8 +203,8 @@ resource "yandex_mdb_postgresql_user" "user" {
 resource "yandex_mdb_redis_cluster" "redis_cluster" {
   environment         = "PRESTABLE"
   network_id          = yandex_vpc_network.network.id
-  for_each = var.zones
-  name     = length(var.zones) > 1 ? "redis-name-${substr(each.value, -1, 0)}" : "redis-name"
+  for_each            = var.zones
+  name                = "redis-name-${each.key}"
 
   tls_enabled         = false
   announce_hostnames  = true
@@ -222,11 +222,6 @@ resource "yandex_mdb_redis_cluster" "redis_cluster" {
 
   host {
     zone             = each.value
-    subnet_id        = yandex_vpc_subnet.subnetwork-to-each-zone[each.value].id
+    subnet_id        = yandex_vpc_subnet.subnetwork-to-each-zone[each.key].id
   }
 }
-
-
-
-
-
