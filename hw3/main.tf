@@ -165,15 +165,16 @@ resource "random_string" "bucket_name" {
 }
 
 resource "yandex_mdb_postgresql_cluster" "mypg" {
-  name                = "mypg"
-  environment         = "PRESTABLE"
-  network_id          = yandex_vpc_network.network.id
+  name        = "mypg"
+  environment = "PRESTABLE"
+  network_id  = yandex_vpc_network.network.id
+
   config {
     version = 17
     resources {
       resource_preset_id = "s2.micro"
       disk_type_id       = "network-ssd"
-      disk_size          = "10"
+      disk_size          = 10
     }
     access {
       data_lens = true
@@ -181,10 +182,14 @@ resource "yandex_mdb_postgresql_cluster" "mypg" {
     }
   }
 
-  host {
-    zone      = "ru-central1-b"
-    name      = "mypg-host-a"
-    subnet_id = yandex_vpc_subnet.subnetwork-to-each-zone["ru-central1-b"].id
+  dynamic "host" {
+    for_each = var.zones
+
+    content {
+      zone      = host.key
+      name      = "mypg-host-${host.key}"
+      subnet_id = yandex_vpc_subnet.subnetwork-to-each-zone[host.key].id
+    }
   }
 }
 
